@@ -6,6 +6,8 @@ import { sessionRoutes } from './routes/sessions';
 import { policyRoutes } from './routes/policies';
 import { progressRoutes } from './routes/progress';
 import { statsRoutes } from './routes/stats';
+import { actionRoutes } from './routes/actions';
+import { searchRoutes, askRoutes } from './routes/search';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -46,6 +48,9 @@ app.route('/api', (() => {
 	api.route('/policies', policyRoutes);
 	api.route('/progress', progressRoutes);
 	api.route('/stats', statsRoutes);
+	api.route('/search', searchRoutes);
+	api.route('/ask', askRoutes);
+	api.route('/', actionRoutes);
 	return api;
 })());
 

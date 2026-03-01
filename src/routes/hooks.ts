@@ -4,6 +4,7 @@ import { generateId, truncate, summarizeToolInput, extractFilePath, safeStringif
 import { evaluatePolicies } from '../services/policy-engine';
 import { upsertSession, endSession, incrementToolCalls } from '../services/session-manager';
 import { extractProgress } from '../services/progress-extractor';
+import { evaluateActionRules } from '../services/action-engine';
 
 export const hookRoutes = new Hono<{ Bindings: Env }>();
 
@@ -96,6 +97,9 @@ hookRoutes.post('/pre-tool-use', async (c) => {
 hookRoutes.post('/post-tool-use', async (c) => {
 	const payload = await c.req.json<PostToolUsePayload>();
 
+	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
+	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
+
 	const eventId = generateId('te');
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
@@ -106,10 +110,21 @@ hookRoutes.post('/post-tool-use', async (c) => {
 			payload.session_id,
 			payload.tool_name,
 			payload.tool_use_id,
-			summarizeToolInput(payload.tool_name, payload.tool_input),
+			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
-			extractFilePath(payload.tool_name, payload.tool_input)
+			filePath
 		).run()
+	);
+
+	c.executionCtx.waitUntil(
+		evaluateActionRules(c.env, {
+			session_id: payload.session_id,
+			event_type: 'PostToolUse',
+			tool_name: payload.tool_name,
+			input_summary: inputSummary || undefined,
+			file_path: filePath || undefined,
+			success: true,
+		})
 	);
 
 	return c.json({});
@@ -121,6 +136,9 @@ hookRoutes.post('/post-tool-use', async (c) => {
 hookRoutes.post('/post-tool-failure', async (c) => {
 	const payload = await c.req.json<PostToolUsePayload>();
 
+	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
+	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
+
 	const eventId = generateId('te');
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
@@ -131,10 +149,21 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 			payload.session_id,
 			payload.tool_name,
 			payload.tool_use_id,
-			summarizeToolInput(payload.tool_name, payload.tool_input),
+			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
-			extractFilePath(payload.tool_name, payload.tool_input)
+			filePath
 		).run()
+	);
+
+	c.executionCtx.waitUntil(
+		evaluateActionRules(c.env, {
+			session_id: payload.session_id,
+			event_type: 'PostToolUseFailure',
+			tool_name: payload.tool_name,
+			input_summary: inputSummary || undefined,
+			file_path: filePath || undefined,
+			success: false,
+		})
 	);
 
 	return c.json({});
@@ -156,6 +185,14 @@ hookRoutes.post('/stop', async (c) => {
 			payload.session_id,
 			truncate(payload.last_assistant_message, 500)
 		).run()
+	);
+
+	c.executionCtx.waitUntil(
+		evaluateActionRules(c.env, {
+			session_id: payload.session_id,
+			event_type: 'Stop',
+			success: true,
+		})
 	);
 
 	return c.json({});
@@ -204,6 +241,14 @@ hookRoutes.post('/session-end', async (c) => {
 
 	// Extract progress (async)
 	c.executionCtx.waitUntil(extractProgress(c.env, payload.session_id));
+
+	// Trigger action rules for SessionEnd
+	c.executionCtx.waitUntil(
+		evaluateActionRules(c.env, {
+			session_id: payload.session_id,
+			event_type: 'SessionEnd',
+		})
+	);
 
 	return c.json({});
 });

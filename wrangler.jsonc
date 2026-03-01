@@ -21,6 +21,17 @@
     }
   ],
 
+  "vectorize": [
+    {
+      "binding": "VECTORS",
+      "index_name": "claude-hooks-vectors"
+    }
+  ],
+
+  "ai": {
+    "binding": "AI"
+  },
+
   "services": [
     { "binding": "OPS_OS", "service": "ops-os" },
     { "binding": "ANALYTICS_DASHBOARD", "service": "analytics-dashboard" },

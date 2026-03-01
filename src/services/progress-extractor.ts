@@ -1,5 +1,6 @@
 import type { Env, ToolEventRow } from '../types';
 import { generateId } from '../lib/utils';
+import { upsertVector } from './vectorize-service';
 
 /**
  * Extract project progress from a session's tool events.
@@ -99,16 +100,19 @@ export async function extractProgress(env: Env, sessionId: string): Promise<void
 	if (testsPassed) summaryParts.push(`${testsPassed} test runs passed`);
 	if (testsFailed) summaryParts.push(`${testsFailed} test runs failed`);
 
+	const projectStatusId = generateId('ps');
+	const summaryText = summaryParts.join('; ') || null;
+
 	// Insert project_status
 	await env.DB.prepare(`
 		INSERT INTO project_status (id, project, session_id, status, summary, files_modified, issues_referenced, commits, tests_passed, tests_failed, typecheck_errors, deploy_status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`).bind(
-		generateId('ps'),
+		projectStatusId,
 		primaryProject,
 		sessionId,
 		status,
-		summaryParts.join('; ') || null,
+		summaryText,
 		JSON.stringify(Array.from(filesModified)),
 		JSON.stringify(Array.from(issuesReferenced)),
 		JSON.stringify(commits),
@@ -117,6 +121,21 @@ export async function extractProgress(env: Env, sessionId: string): Promise<void
 		typecheckErrors,
 		deployStatus
 	).run();
+
+	// Embed progress data for semantic search (only when VECTORS binding exists)
+	if (env.VECTORS && env.AI) {
+		const embedText = `Project: ${primaryProject}. Status: ${status}. ${summaryParts.join('. ')}`;
+		try {
+			await upsertVector(env, `ps_${primaryProject}_${Date.now()}`, embedText, {
+				type: 'project_status',
+				project: primaryProject,
+				session_id: sessionId,
+				status: status,
+			});
+		} catch (e) {
+			console.error('Failed to embed progress:', e);
+		}
+	}
 }
 
 /**
