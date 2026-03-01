@@ -10,22 +10,24 @@ export async function upsertSession(
 	sessionId: string,
 	cwd?: string,
 	permissionMode?: string,
-	hostname?: string
+	hostname?: string,
+	tenantId?: string
 ): Promise<void> {
 	const project = extractProjectName(cwd);
 	const deviceId = await generateDeviceId(hostname);
 
 	// Try insert, update on conflict
 	await db.prepare(`
-		INSERT INTO sessions (id, device_id, hostname, cwd, project, permission_mode, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT INTO sessions (id, device_id, hostname, cwd, project, permission_mode, tenant_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(id) DO UPDATE SET
 			cwd = COALESCE(excluded.cwd, sessions.cwd),
 			project = COALESCE(excluded.project, sessions.project),
 			permission_mode = COALESCE(excluded.permission_mode, sessions.permission_mode),
 			hostname = COALESCE(excluded.hostname, sessions.hostname),
-			device_id = COALESCE(excluded.device_id, sessions.device_id)
-	`).bind(sessionId, deviceId, hostname, cwd, project, permissionMode).run();
+			device_id = COALESCE(excluded.device_id, sessions.device_id),
+			tenant_id = COALESCE(excluded.tenant_id, sessions.tenant_id)
+	`).bind(sessionId, deviceId, hostname, cwd, project, permissionMode, tenantId || null).run();
 }
 
 /**

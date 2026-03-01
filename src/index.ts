@@ -8,6 +8,7 @@ import { progressRoutes } from './routes/progress';
 import { statsRoutes } from './routes/stats';
 import { actionRoutes } from './routes/actions';
 import { searchRoutes, askRoutes } from './routes/search';
+import { tenantHookRoutes } from './routes/tenant-hooks';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -37,6 +38,11 @@ app.route('/hooks', (() => {
 	hooks.route('/', hookRoutes);
 	return hooks;
 })());
+
+// ---------------------------------------------------------------------------
+// Multi-tenant hook routes (CloudClaw integration — tenant API key auth)
+// ---------------------------------------------------------------------------
+app.route('/hooks/tenant', tenantHookRoutes);
 
 // ---------------------------------------------------------------------------
 // Admin API routes (admin API key auth)
