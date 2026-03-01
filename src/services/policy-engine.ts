@@ -1,4 +1,5 @@
 import type { Env, PolicyRow, PreToolUsePayload } from '../types';
+import { HookEvents, PolicyConditions, Tools } from '../config/manifest';
 
 const POLICY_CACHE_TTL = 300; // 5 minutes
 const POLICY_CACHE_KEY = 'policies:active';
@@ -32,7 +33,7 @@ export async function evaluatePolicies(
 	payload: PreToolUsePayload,
 	tenantId?: string
 ): Promise<PolicyDecision> {
-	const policies = await getActivePolicies(env, 'PreToolUse', tenantId);
+	const policies = await getActivePolicies(env, HookEvents.PRE_TOOL_USE, tenantId);
 
 	for (const policy of policies) {
 		// Check tool_matcher regex
@@ -114,11 +115,11 @@ function evaluateCondition(policy: PolicyRow, payload: PreToolUsePayload): boole
 	if (!condition) return false;
 
 	switch (policy.condition_type) {
-		case 'block_pattern':
+		case PolicyConditions.BLOCK_PATTERN:
 			return evaluateBlockPattern(condition, payload);
-		case 'file_protection':
+		case PolicyConditions.FILE_PROTECTION:
 			return evaluateFileProtection(condition, payload);
-		case 'secret_detection':
+		case PolicyConditions.SECRET_DETECTION:
 			return evaluateSecretDetection(payload);
 		default:
 			return false;
@@ -173,7 +174,7 @@ function evaluateSecretDetection(payload: PreToolUsePayload): boolean {
 }
 
 function getCommandString(payload: PreToolUsePayload): string | null {
-	if (payload.tool_name === 'Bash') {
+	if (payload.tool_name === Tools.BASH) {
 		return (payload.tool_input.command as string) || null;
 	}
 	return null;

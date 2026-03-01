@@ -1,3 +1,5 @@
+import { Tools, FILE_PATH_TOOLS, DIR_PATH_TOOLS } from '../config/manifest';
+
 /**
  * Generate a prefixed unique ID
  */
@@ -55,18 +57,13 @@ export function safeStringify(obj: unknown, maxLength = 2000): string | null {
  * Extract file_path from tool input based on tool name
  */
 export function extractFilePath(toolName: string, toolInput: Record<string, unknown>): string | null {
-	switch (toolName) {
-		case 'Read':
-		case 'Write':
-		case 'Edit':
-			return (toolInput.file_path as string) || null;
-		case 'Glob':
-			return (toolInput.path as string) || null;
-		case 'Grep':
-			return (toolInput.path as string) || null;
-		default:
-			return null;
+	if (FILE_PATH_TOOLS.has(toolName)) {
+		return (toolInput.file_path as string) || null;
 	}
+	if (DIR_PATH_TOOLS.has(toolName)) {
+		return (toolInput.path as string) || null;
+	}
+	return null;
 }
 
 /**
@@ -74,23 +71,23 @@ export function extractFilePath(toolName: string, toolInput: Record<string, unkn
  */
 export function summarizeToolInput(toolName: string, toolInput: Record<string, unknown>): string | null {
 	switch (toolName) {
-		case 'Bash':
+		case Tools.BASH:
 			return truncate(toolInput.command as string, 500);
-		case 'Read':
+		case Tools.READ:
 			return `Read ${toolInput.file_path}`;
-		case 'Write':
+		case Tools.WRITE:
 			return `Write ${toolInput.file_path} (${((toolInput.content as string) || '').length} chars)`;
-		case 'Edit':
+		case Tools.EDIT:
 			return `Edit ${toolInput.file_path}`;
-		case 'Glob':
+		case Tools.GLOB:
 			return `Glob ${toolInput.pattern} in ${toolInput.path || 'cwd'}`;
-		case 'Grep':
+		case Tools.GREP:
 			return `Grep "${toolInput.pattern}" in ${toolInput.path || 'cwd'}`;
-		case 'WebFetch':
+		case Tools.WEB_FETCH:
 			return `Fetch ${toolInput.url}`;
-		case 'WebSearch':
+		case Tools.WEB_SEARCH:
 			return `Search "${toolInput.query}"`;
-		case 'Task':
+		case Tools.TASK:
 			return truncate(`Task: ${toolInput.description || toolInput.prompt}`, 500);
 		default:
 			return truncate(safeStringify(toolInput), 500);

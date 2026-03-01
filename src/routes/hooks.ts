@@ -5,6 +5,8 @@ import { evaluatePolicies } from '../services/policy-engine';
 import { upsertSession, endSession, incrementToolCalls } from '../services/session-manager';
 import { extractProgress } from '../services/progress-extractor';
 import { evaluateActionRules } from '../services/action-engine';
+import { HookEvents, Tools, IdPrefixes } from '../config/manifest';
+import { SIMPLE_EVENT_ROUTES } from '../config/route-registry';
 
 export const hookRoutes = new Hono<{ Bindings: Env }>();
 
@@ -40,7 +42,7 @@ hookRoutes.post('/prompt', async (c) => {
 			INSERT INTO prompts (id, session_id, prompt_text, prompt_length)
 			VALUES (?, ?, ?, ?)
 		`).bind(
-			generateId('prm'),
+			generateId(IdPrefixes.PROMPT),
 			payload.session_id,
 			truncate(payload.prompt, 500),
 			payload.prompt?.length || 0
@@ -61,14 +63,15 @@ hookRoutes.post('/pre-tool-use', async (c) => {
 	const decision = await evaluatePolicies(c.env, payload);
 
 	// Log tool event (async, don't block response)
-	const eventId = generateId('te');
+	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, file_path, decision, decision_reason, policy_id)
-			VALUES (?, ?, 'PreToolUse', ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).bind(
 			eventId,
 			payload.session_id,
+			HookEvents.PRE_TOOL_USE,
 			payload.tool_name,
 			payload.tool_use_id,
 			summarizeToolInput(payload.tool_name, payload.tool_input),
@@ -109,14 +112,15 @@ hookRoutes.post('/post-tool-use', async (c) => {
 	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
 	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
 
-	const eventId = generateId('te');
+	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
-			VALUES (?, ?, 'PostToolUse', ?, ?, ?, ?, ?, 1)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
 		`).bind(
 			eventId,
 			payload.session_id,
+			HookEvents.POST_TOOL_USE,
 			payload.tool_name,
 			payload.tool_use_id,
 			inputSummary,
@@ -129,7 +133,7 @@ hookRoutes.post('/post-tool-use', async (c) => {
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
 			session_id: payload.session_id,
-			event_type: 'PostToolUse',
+			event_type: HookEvents.POST_TOOL_USE,
 			tool_name: payload.tool_name,
 			input_summary: inputSummary || undefined,
 			file_path: filePath || undefined,
@@ -149,14 +153,15 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
 	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
 
-	const eventId = generateId('te');
+	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
-			VALUES (?, ?, 'PostToolUseFailure', ?, ?, ?, ?, ?, 0)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
 		`).bind(
 			eventId,
 			payload.session_id,
+			HookEvents.POST_TOOL_USE_FAILURE,
 			payload.tool_name,
 			payload.tool_use_id,
 			inputSummary,
@@ -169,7 +174,7 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
 			session_id: payload.session_id,
-			event_type: 'PostToolUseFailure',
+			event_type: HookEvents.POST_TOOL_USE_FAILURE,
 			tool_name: payload.tool_name,
 			input_summary: inputSummary || undefined,
 			file_path: filePath || undefined,
@@ -190,10 +195,12 @@ hookRoutes.post('/stop', async (c) => {
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, success)
-			VALUES (?, ?, 'Stop', 'Stop', NULL, ?, 1)
+			VALUES (?, ?, ?, ?, NULL, ?, 1)
 		`).bind(
-			generateId('te'),
+			generateId(IdPrefixes.TOOL_EVENT),
 			payload.session_id,
+			HookEvents.STOP,
+			Tools.STOP,
 			truncate(payload.last_assistant_message, 500)
 		).run()
 			.catch(e => console.error('[hooks] waitUntil error:', e))
@@ -202,7 +209,7 @@ hookRoutes.post('/stop', async (c) => {
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
 			session_id: payload.session_id,
-			event_type: 'Stop',
+			event_type: HookEvents.STOP,
 			success: true,
 		}).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
@@ -219,8 +226,8 @@ hookRoutes.post('/subagent-start', async (c) => {
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'SubagentStart', 'Subagent', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
+			VALUES (?, ?, ?, ?, NULL, 1)
+		`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, HookEvents.SUBAGENT_START, Tools.SUBAGENT).run()
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -236,8 +243,8 @@ hookRoutes.post('/subagent-stop', async (c) => {
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'SubagentStop', 'Subagent', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
+			VALUES (?, ?, ?, ?, NULL, 1)
+		`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, HookEvents.SUBAGENT_STOP, Tools.SUBAGENT).run()
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -266,7 +273,7 @@ hookRoutes.post('/session-end', async (c) => {
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
 			session_id: payload.session_id,
-			event_type: 'SessionEnd',
+			event_type: HookEvents.SESSION_END,
 		}).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -284,7 +291,7 @@ hookRoutes.post('/worktree-create', async (c) => {
 			INSERT INTO worktrees (id, session_id, name, branch, path, project, status)
 			VALUES (?, ?, ?, ?, ?, ?, 'active')
 		`).bind(
-			generateId('wt'),
+			generateId(IdPrefixes.WORKTREE),
 			payload.session_id,
 			payload.name || null,
 			payload.branch || null,
@@ -317,103 +324,20 @@ hookRoutes.post('/worktree-remove', async (c) => {
 });
 
 // --------------------------------------------------------------------------
-// POST /hooks/permission-request — PermissionRequest
+// Simple event handlers — generated from route registry
 // --------------------------------------------------------------------------
-hookRoutes.post('/permission-request', async (c) => {
-	const payload = await c.req.json<HookPayload>();
+for (const route of SIMPLE_EVENT_ROUTES) {
+	hookRoutes.post(`/${route.path}`, async (c) => {
+		const payload = await c.req.json<HookPayload>();
 
-	c.executionCtx.waitUntil(
-		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'PermissionRequest', 'Permission', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
-			.catch(e => console.error('[hooks] waitUntil error:', e))
-	);
+		c.executionCtx.waitUntil(
+			c.env.DB.prepare(`
+				INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
+				VALUES (?, ?, ?, ?, NULL, 1)
+			`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, route.event, route.defaultToolName).run()
+				.catch(e => console.error('[hooks] waitUntil error:', e))
+		);
 
-	return c.json({});
-});
-
-// --------------------------------------------------------------------------
-// POST /hooks/notification — Notification
-// --------------------------------------------------------------------------
-hookRoutes.post('/notification', async (c) => {
-	const payload = await c.req.json<HookPayload>();
-
-	c.executionCtx.waitUntil(
-		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'Notification', 'Notification', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
-			.catch(e => console.error('[hooks] waitUntil error:', e))
-	);
-
-	return c.json({});
-});
-
-// --------------------------------------------------------------------------
-// POST /hooks/config-change — ConfigChange
-// --------------------------------------------------------------------------
-hookRoutes.post('/config-change', async (c) => {
-	const payload = await c.req.json<HookPayload>();
-
-	c.executionCtx.waitUntil(
-		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'ConfigChange', 'Config', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
-			.catch(e => console.error('[hooks] waitUntil error:', e))
-	);
-
-	return c.json({});
-});
-
-// --------------------------------------------------------------------------
-// POST /hooks/pre-compact — PreCompact
-// --------------------------------------------------------------------------
-hookRoutes.post('/pre-compact', async (c) => {
-	const payload = await c.req.json<HookPayload>();
-
-	c.executionCtx.waitUntil(
-		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'PreCompact', 'Compact', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
-			.catch(e => console.error('[hooks] waitUntil error:', e))
-	);
-
-	return c.json({});
-});
-
-// --------------------------------------------------------------------------
-// POST /hooks/task-completed — TaskCompleted
-// --------------------------------------------------------------------------
-hookRoutes.post('/task-completed', async (c) => {
-	const payload = await c.req.json<HookPayload>();
-
-	c.executionCtx.waitUntil(
-		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'TaskCompleted', 'Task', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
-			.catch(e => console.error('[hooks] waitUntil error:', e))
-	);
-
-	return c.json({});
-});
-
-// --------------------------------------------------------------------------
-// POST /hooks/teammate-idle — TeammateIdle
-// --------------------------------------------------------------------------
-hookRoutes.post('/teammate-idle', async (c) => {
-	const payload = await c.req.json<HookPayload>();
-
-	c.executionCtx.waitUntil(
-		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-			VALUES (?, ?, 'TeammateIdle', 'Teammate', NULL, 1)
-		`).bind(generateId('te'), payload.session_id).run()
-			.catch(e => console.error('[hooks] waitUntil error:', e))
-	);
-
-	return c.json({});
-});
+		return c.json({});
+	});
+}

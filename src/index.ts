@@ -8,6 +8,7 @@ import { progressRoutes } from './routes/progress';
 import { statsRoutes } from './routes/stats';
 import { actionRoutes } from './routes/actions';
 import { searchRoutes, askRoutes } from './routes/search';
+import { manifestRoutes } from './routes/manifest';
 import { tenantHookRoutes } from './routes/tenant-hooks';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -56,6 +57,7 @@ app.route('/api', (() => {
 	api.route('/stats', statsRoutes);
 	api.route('/search', searchRoutes);
 	api.route('/ask', askRoutes);
+	api.route('/manifest', manifestRoutes);
 	api.route('/', actionRoutes);
 	return api;
 })());

@@ -1,5 +1,7 @@
 import type { Env, ActionRuleRow } from '../types';
 import { generateId } from '../lib/utils';
+import { ActionTypes, IdPrefixes } from '../config/manifest';
+import type { NotifyDiscordConfig, SyncOpsConfig, TrackEventConfig, SendEmailConfig, WebhookConfig } from '../config/schemas';
 
 // Cache TTL for action rules (5 minutes)
 const RULES_CACHE_TTL = 300;
@@ -19,32 +21,6 @@ interface TriggerCondition {
 	input_contains?: string;
 	file_path_contains?: string;
 	success?: boolean;
-}
-
-interface NotifyDiscordConfig {
-	webhook_url: string;
-	message_template?: string;
-}
-
-interface SyncOpsConfig {
-	endpoint: string;
-	node_type?: string;
-}
-
-interface TrackEventConfig {
-	event_name: string;
-	site_id?: string;
-}
-
-interface SendEmailConfig {
-	template: string;
-	to: string;
-}
-
-interface WebhookConfig {
-	url: string;
-	headers?: Record<string, string>;
-	body_template?: string;
 }
 
 type ActionConfig = NotifyDiscordConfig | SyncOpsConfig | TrackEventConfig | SendEmailConfig | WebhookConfig;
@@ -71,7 +47,7 @@ export async function evaluateActionRules(env: Env, event: ActionEvent, tenantId
 			}
 
 			// Execute action
-			const logId = generateId('al');
+			const logId = generateId(IdPrefixes.ACTION_LOG);
 			const result = await executeAction(env, rule, event);
 
 			// Log result
@@ -185,15 +161,15 @@ async function executeAction(env: Env, rule: ActionRuleRow, event: ActionEvent):
 	}
 
 	switch (rule.action_type) {
-		case 'notify_discord':
+		case ActionTypes.NOTIFY_DISCORD:
 			return executeNotifyDiscord(config as NotifyDiscordConfig, event);
-		case 'sync_ops':
+		case ActionTypes.SYNC_OPS:
 			return executeSyncOps(env, config as SyncOpsConfig, event);
-		case 'track_event':
+		case ActionTypes.TRACK_EVENT:
 			return executeTrackEvent(env, config as TrackEventConfig, event);
-		case 'send_email':
+		case ActionTypes.SEND_EMAIL:
 			return executeSendEmail(env, config as SendEmailConfig, event);
-		case 'webhook':
+		case ActionTypes.WEBHOOK:
 			return executeWebhook(config as WebhookConfig, event);
 		default:
 			return { status: 'error', detail: `Unknown action_type: ${rule.action_type}` };

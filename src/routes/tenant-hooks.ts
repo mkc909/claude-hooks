@@ -5,6 +5,8 @@ import { evaluatePolicies } from '../services/policy-engine';
 import { upsertSession, endSession, incrementToolCalls } from '../services/session-manager';
 import { extractProgress } from '../services/progress-extractor';
 import { evaluateActionRules } from '../services/action-engine';
+import { HookEvents, Tools, IdPrefixes } from '../config/manifest';
+import { SIMPLE_EVENT_ROUTES } from '../config/route-registry';
 
 /**
  * Multi-tenant hook routes for CloudClaw customers.
@@ -89,7 +91,7 @@ tenantHookRoutes.post('/:tenantId/prompt', async (c) => {
 			INSERT INTO prompts (id, session_id, tenant_id, prompt_text, prompt_length)
 			VALUES (?, ?, ?, ?, ?)
 		`).bind(
-			generateId('prm'),
+			generateId(IdPrefixes.PROMPT),
 			payload.session_id,
 			tenantId,
 			truncate(payload.prompt, 500),
@@ -111,15 +113,16 @@ tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 	// Evaluate tenant-scoped policies
 	const decision = await evaluatePolicies(c.env, payload, tenantId);
 
-	const eventId = generateId('te');
+	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, file_path, decision, decision_reason, policy_id)
-			VALUES (?, ?, ?, 'PreToolUse', ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).bind(
 			eventId,
 			payload.session_id,
 			tenantId,
+			HookEvents.PRE_TOOL_USE,
 			payload.tool_name,
 			payload.tool_use_id,
 			summarizeToolInput(payload.tool_name, payload.tool_input),
@@ -159,15 +162,16 @@ tenantHookRoutes.post('/:tenantId/post-tool-use', async (c) => {
 	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
 	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
 
-	const eventId = generateId('te');
+	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
-			VALUES (?, ?, ?, 'PostToolUse', ?, ?, ?, ?, ?, 1)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 		`).bind(
 			eventId,
 			payload.session_id,
 			tenantId,
+			HookEvents.POST_TOOL_USE,
 			payload.tool_name,
 			payload.tool_use_id,
 			inputSummary,
@@ -190,15 +194,16 @@ tenantHookRoutes.post('/:tenantId/post-tool-failure', async (c) => {
 	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
 	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
 
-	const eventId = generateId('te');
+	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
-			VALUES (?, ?, ?, 'PostToolUseFailure', ?, ?, ?, ?, ?, 0)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
 		`).bind(
 			eventId,
 			payload.session_id,
 			tenantId,
+			HookEvents.POST_TOOL_USE_FAILURE,
 			payload.tool_name,
 			payload.tool_use_id,
 			inputSummary,
@@ -221,11 +226,13 @@ tenantHookRoutes.post('/:tenantId/stop', async (c) => {
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, success)
-			VALUES (?, ?, ?, 'Stop', 'Stop', NULL, ?, 1)
+			VALUES (?, ?, ?, ?, ?, NULL, ?, 1)
 		`).bind(
-			generateId('te'),
+			generateId(IdPrefixes.TOOL_EVENT),
 			payload.session_id,
 			tenantId,
+			HookEvents.STOP,
+			Tools.STOP,
 			truncate(payload.last_assistant_message, 500)
 		).run()
 			.catch(e => console.error('[hooks] waitUntil error:', e))
@@ -256,7 +263,7 @@ tenantHookRoutes.post('/:tenantId/session-end', async (c) => {
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
 			session_id: payload.session_id,
-			event_type: 'SessionEnd',
+			event_type: HookEvents.SESSION_END,
 		}, tenantId).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -264,30 +271,10 @@ tenantHookRoutes.post('/:tenantId/session-end', async (c) => {
 });
 
 // --------------------------------------------------------------------------
-// Generic handler for events that only need logging
+// Simple event handlers — generated from route registry
 // --------------------------------------------------------------------------
-const simpleEvents = [
-	'subagent-start', 'subagent-stop', 'worktree-create', 'worktree-remove',
-	'permission-request', 'notification', 'config-change', 'pre-compact',
-	'task-completed', 'teammate-idle',
-] as const;
-
-const eventTypeMap: Record<string, { eventType: string; toolName: string }> = {
-	'subagent-start': { eventType: 'SubagentStart', toolName: 'Subagent' },
-	'subagent-stop': { eventType: 'SubagentStop', toolName: 'Subagent' },
-	'worktree-create': { eventType: 'WorktreeCreate', toolName: 'Worktree' },
-	'worktree-remove': { eventType: 'WorktreeRemove', toolName: 'Worktree' },
-	'permission-request': { eventType: 'PermissionRequest', toolName: 'Permission' },
-	'notification': { eventType: 'Notification', toolName: 'Notification' },
-	'config-change': { eventType: 'ConfigChange', toolName: 'Config' },
-	'pre-compact': { eventType: 'PreCompact', toolName: 'Compact' },
-	'task-completed': { eventType: 'TaskCompleted', toolName: 'Task' },
-	'teammate-idle': { eventType: 'TeammateIdle', toolName: 'Teammate' },
-};
-
-for (const event of simpleEvents) {
-	const { eventType, toolName } = eventTypeMap[event];
-	tenantHookRoutes.post(`/:tenantId/${event}`, async (c) => {
+for (const route of SIMPLE_EVENT_ROUTES) {
+	tenantHookRoutes.post(`/:tenantId/${route.path}`, async (c) => {
 		const tenantId = c.req.param('tenantId');
 		const payload = await c.req.json<HookPayload>();
 
@@ -295,7 +282,7 @@ for (const event of simpleEvents) {
 			c.env.DB.prepare(`
 				INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, success)
 				VALUES (?, ?, ?, ?, ?, NULL, 1)
-			`).bind(generateId('te'), payload.session_id, tenantId, eventType, toolName).run()
+			`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, tenantId, route.event, route.defaultToolName).run()
 				.catch(e => console.error('[hooks] waitUntil error:', e))
 		);
 
