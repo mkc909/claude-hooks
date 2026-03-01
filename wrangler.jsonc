@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "claude-hooks",
+  "account_id": "af57e902fd9dcaad7484a7195ac0f536",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "claude-hooks-db",
+      "database_id": "b614e651-07cf-40ef-a9a3-20a21b829f89"
+    }
+  ],
+
+  "kv_namespaces": [
+    {
+      "binding": "CACHE",
+      "id": "6ddbfd3f29cb47838da0a8fc5e3f8748"
+    }
+  ],
+
+  "services": [
+    { "binding": "OPS_OS", "service": "ops-os" },
+    { "binding": "ANALYTICS_DASHBOARD", "service": "analytics-dashboard" },
+    { "binding": "EMAIL_SERVICE", "service": "email-service" },
+    { "binding": "DEPLOY_BOT", "service": "deploy-bot" }
+  ],
+
+  "triggers": {
+    "crons": [
+      "0 * * * *",
+      "0 0 * * *",
+      "0 0 * * 1"
+    ]
+  },
+
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 1 }
+  },
+
+  "vars": {
+    "ENVIRONMENT": "production"
+  }
+}

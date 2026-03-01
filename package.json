@@ -1,0 +1,25 @@
+{
+  "name": "claude-hooks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Claude Code HTTP hooks — observability, security policies, and intelligence layer",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "db:migrate:local": "wrangler d1 migrations apply claude-hooks-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply claude-hooks-db --remote",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "@mkc909/worker-lib": "^1.8.0",
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250224.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.0.0"
+  }
+}
