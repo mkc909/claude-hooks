@@ -3,6 +3,8 @@ import type { Env, PreToolUsePayload, PostToolUsePayload, HookPayload, StopPaylo
 import { generateId, truncate, summarizeToolInput, extractFilePath, safeStringify } from '../lib/utils';
 import { evaluatePolicies } from '../services/policy-engine';
 import { upsertSession, endSession, incrementToolCalls } from '../services/session-manager';
+import { extractProgress } from '../services/progress-extractor';
+import { evaluateActionRules } from '../services/action-engine';
 
 /**
  * Multi-tenant hook routes for CloudClaw customers.
@@ -29,7 +31,7 @@ async function verifyTenantAccess(c: { env: Env; req: { header: (name: string) =
 
 	// Verify against D1 (tenant_api_keys table or policies table)
 	const row = await c.env.DB.prepare(
-		"SELECT id FROM tenant_api_keys WHERE tenant_id = ? AND api_key = ? AND is_active = 1"
+		"SELECT id FROM tenant_api_keys WHERE tenant_id = ? AND api_key = ? AND is_active = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))"
 	).bind(tenantId, token).first();
 
 	if (row) {
@@ -64,6 +66,7 @@ tenantHookRoutes.post('/:tenantId/session-start', async (c) => {
 
 	c.executionCtx.waitUntil(
 		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode, tenantId)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -76,18 +79,23 @@ tenantHookRoutes.post('/:tenantId/prompt', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<UserPromptSubmitPayload>();
 
-	c.executionCtx.waitUntil(upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode, tenantId));
+	c.executionCtx.waitUntil(
+		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode, tenantId)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
 
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
-			INSERT INTO prompts (id, session_id, prompt_text, prompt_length)
-			VALUES (?, ?, ?, ?)
+			INSERT INTO prompts (id, session_id, tenant_id, prompt_text, prompt_length)
+			VALUES (?, ?, ?, ?, ?)
 		`).bind(
 			generateId('prm'),
 			payload.session_id,
+			tenantId,
 			truncate(payload.prompt, 500),
 			payload.prompt?.length || 0
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -106,11 +114,12 @@ tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 	const eventId = generateId('te');
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, file_path, decision, decision_reason, policy_id)
-			VALUES (?, ?, 'PreToolUse', ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, file_path, decision, decision_reason, policy_id)
+			VALUES (?, ?, ?, 'PreToolUse', ?, ?, ?, ?, ?, ?, ?)
 		`).bind(
 			eventId,
 			payload.session_id,
+			tenantId,
 			payload.tool_name,
 			payload.tool_use_id,
 			summarizeToolInput(payload.tool_name, payload.tool_input),
@@ -119,9 +128,13 @@ tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 			decision.reason || null,
 			decision.policyId || null
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
-	c.executionCtx.waitUntil(incrementToolCalls(c.env.DB, payload.session_id));
+	c.executionCtx.waitUntil(
+		incrementToolCalls(c.env.DB, payload.session_id)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
 
 	if (!decision.allowed) {
 		return c.json({
@@ -140,6 +153,7 @@ tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 // POST /tenant/:tenantId/post-tool-use
 // --------------------------------------------------------------------------
 tenantHookRoutes.post('/:tenantId/post-tool-use', async (c) => {
+	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<PostToolUsePayload>();
 
 	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
@@ -148,17 +162,19 @@ tenantHookRoutes.post('/:tenantId/post-tool-use', async (c) => {
 	const eventId = generateId('te');
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
-			VALUES (?, ?, 'PostToolUse', ?, ?, ?, ?, ?, 1)
+			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
+			VALUES (?, ?, ?, 'PostToolUse', ?, ?, ?, ?, ?, 1)
 		`).bind(
 			eventId,
 			payload.session_id,
+			tenantId,
 			payload.tool_name,
 			payload.tool_use_id,
 			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -168,6 +184,7 @@ tenantHookRoutes.post('/:tenantId/post-tool-use', async (c) => {
 // POST /tenant/:tenantId/post-tool-failure
 // --------------------------------------------------------------------------
 tenantHookRoutes.post('/:tenantId/post-tool-failure', async (c) => {
+	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<PostToolUsePayload>();
 
 	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
@@ -176,17 +193,19 @@ tenantHookRoutes.post('/:tenantId/post-tool-failure', async (c) => {
 	const eventId = generateId('te');
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
-			VALUES (?, ?, 'PostToolUseFailure', ?, ?, ?, ?, ?, 0)
+			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, output_summary, file_path, success)
+			VALUES (?, ?, ?, 'PostToolUseFailure', ?, ?, ?, ?, ?, 0)
 		`).bind(
 			eventId,
 			payload.session_id,
+			tenantId,
 			payload.tool_name,
 			payload.tool_use_id,
 			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -196,17 +215,20 @@ tenantHookRoutes.post('/:tenantId/post-tool-failure', async (c) => {
 // POST /tenant/:tenantId/stop
 // --------------------------------------------------------------------------
 tenantHookRoutes.post('/:tenantId/stop', async (c) => {
+	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<StopPayload>();
 
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
-			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, input_summary, success)
-			VALUES (?, ?, 'Stop', 'Stop', NULL, ?, 1)
+			INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, input_summary, success)
+			VALUES (?, ?, ?, 'Stop', 'Stop', NULL, ?, 1)
 		`).bind(
 			generateId('te'),
 			payload.session_id,
+			tenantId,
 			truncate(payload.last_assistant_message, 500)
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -216,9 +238,27 @@ tenantHookRoutes.post('/:tenantId/stop', async (c) => {
 // POST /tenant/:tenantId/session-end
 // --------------------------------------------------------------------------
 tenantHookRoutes.post('/:tenantId/session-end', async (c) => {
+	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<HookPayload>();
 
-	c.executionCtx.waitUntil(endSession(c.env.DB, payload.session_id));
+	c.executionCtx.waitUntil(
+		endSession(c.env.DB, payload.session_id)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
+
+	// Extract progress (async)
+	c.executionCtx.waitUntil(
+		extractProgress(c.env, payload.session_id)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
+
+	// Trigger action rules for SessionEnd (tenant-scoped)
+	c.executionCtx.waitUntil(
+		evaluateActionRules(c.env, {
+			session_id: payload.session_id,
+			event_type: 'SessionEnd',
+		}, tenantId).catch(e => console.error('[hooks] waitUntil error:', e))
+	);
 
 	return c.json({});
 });
@@ -248,13 +288,15 @@ const eventTypeMap: Record<string, { eventType: string; toolName: string }> = {
 for (const event of simpleEvents) {
 	const { eventType, toolName } = eventTypeMap[event];
 	tenantHookRoutes.post(`/:tenantId/${event}`, async (c) => {
+		const tenantId = c.req.param('tenantId');
 		const payload = await c.req.json<HookPayload>();
 
 		c.executionCtx.waitUntil(
 			c.env.DB.prepare(`
-				INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
-				VALUES (?, ?, ?, ?, NULL, 1)
-			`).bind(generateId('te'), payload.session_id, eventType, toolName).run()
+				INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, success)
+				VALUES (?, ?, ?, ?, ?, NULL, 1)
+			`).bind(generateId('te'), payload.session_id, tenantId, eventType, toolName).run()
+				.catch(e => console.error('[hooks] waitUntil error:', e))
 		);
 
 		return c.json({});

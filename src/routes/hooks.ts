@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, PreToolUsePayload, PostToolUsePayload, UserPromptSubmitPayload, StopPayload, HookPayload } from '../types';
-import { generateId, truncate, summarizeToolInput, extractFilePath, safeStringify } from '../lib/utils';
+import { generateId, truncate, summarizeToolInput, extractFilePath, safeStringify, extractProjectName } from '../lib/utils';
 import { evaluatePolicies } from '../services/policy-engine';
 import { upsertSession, endSession, incrementToolCalls } from '../services/session-manager';
 import { extractProgress } from '../services/progress-extractor';
@@ -16,6 +16,7 @@ hookRoutes.post('/session-start', async (c) => {
 
 	c.executionCtx.waitUntil(
 		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -28,7 +29,10 @@ hookRoutes.post('/prompt', async (c) => {
 	const payload = await c.req.json<UserPromptSubmitPayload>();
 
 	// Ensure session exists
-	c.executionCtx.waitUntil(upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode));
+	c.executionCtx.waitUntil(
+		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
 
 	// Log prompt
 	c.executionCtx.waitUntil(
@@ -41,6 +45,7 @@ hookRoutes.post('/prompt', async (c) => {
 			truncate(payload.prompt, 500),
 			payload.prompt?.length || 0
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -72,10 +77,14 @@ hookRoutes.post('/pre-tool-use', async (c) => {
 			decision.reason || null,
 			decision.policyId || null
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	// Increment session tool call counter
-	c.executionCtx.waitUntil(incrementToolCalls(c.env.DB, payload.session_id));
+	c.executionCtx.waitUntil(
+		incrementToolCalls(c.env.DB, payload.session_id)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
 
 	// Return decision
 	if (!decision.allowed) {
@@ -114,6 +123,7 @@ hookRoutes.post('/post-tool-use', async (c) => {
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	c.executionCtx.waitUntil(
@@ -124,7 +134,7 @@ hookRoutes.post('/post-tool-use', async (c) => {
 			input_summary: inputSummary || undefined,
 			file_path: filePath || undefined,
 			success: true,
-		})
+		}).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -153,6 +163,7 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	c.executionCtx.waitUntil(
@@ -163,7 +174,7 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 			input_summary: inputSummary || undefined,
 			file_path: filePath || undefined,
 			success: false,
-		})
+		}).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -185,6 +196,7 @@ hookRoutes.post('/stop', async (c) => {
 			payload.session_id,
 			truncate(payload.last_assistant_message, 500)
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	c.executionCtx.waitUntil(
@@ -192,7 +204,7 @@ hookRoutes.post('/stop', async (c) => {
 			session_id: payload.session_id,
 			event_type: 'Stop',
 			success: true,
-		})
+		}).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -209,6 +221,7 @@ hookRoutes.post('/subagent-start', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'SubagentStart', 'Subagent', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -225,6 +238,7 @@ hookRoutes.post('/subagent-stop', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'SubagentStop', 'Subagent', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -237,17 +251,23 @@ hookRoutes.post('/session-end', async (c) => {
 	const payload = await c.req.json<HookPayload>();
 
 	// End session
-	c.executionCtx.waitUntil(endSession(c.env.DB, payload.session_id));
+	c.executionCtx.waitUntil(
+		endSession(c.env.DB, payload.session_id)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
 
 	// Extract progress (async)
-	c.executionCtx.waitUntil(extractProgress(c.env, payload.session_id));
+	c.executionCtx.waitUntil(
+		extractProgress(c.env, payload.session_id)
+			.catch(e => console.error('[hooks] waitUntil error:', e))
+	);
 
 	// Trigger action rules for SessionEnd
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
 			session_id: payload.session_id,
 			event_type: 'SessionEnd',
-		})
+		}).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -269,8 +289,9 @@ hookRoutes.post('/worktree-create', async (c) => {
 			payload.name || null,
 			payload.branch || null,
 			payload.path || payload.cwd || '',
-			payload.cwd ? (await import('../lib/utils')).extractProjectName(payload.cwd) : null
+			payload.cwd ? extractProjectName(payload.cwd) : null
 		).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -288,6 +309,7 @@ hookRoutes.post('/worktree-remove', async (c) => {
 				UPDATE worktrees SET status = 'cleaned', removed_at = datetime('now')
 				WHERE session_id = ? AND path = ? AND status = 'active'
 			`).bind(payload.session_id, payload.path).run()
+				.catch(e => console.error('[hooks] waitUntil error:', e))
 		);
 	}
 
@@ -305,6 +327,7 @@ hookRoutes.post('/permission-request', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'PermissionRequest', 'Permission', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -321,6 +344,7 @@ hookRoutes.post('/notification', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'Notification', 'Notification', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -337,6 +361,7 @@ hookRoutes.post('/config-change', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'ConfigChange', 'Config', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -353,6 +378,7 @@ hookRoutes.post('/pre-compact', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'PreCompact', 'Compact', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -369,6 +395,7 @@ hookRoutes.post('/task-completed', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'TaskCompleted', 'Task', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});
@@ -385,6 +412,7 @@ hookRoutes.post('/teammate-idle', async (c) => {
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, 'TeammateIdle', 'Teammate', NULL, 1)
 		`).bind(generateId('te'), payload.session_id).run()
+			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	return c.json({});

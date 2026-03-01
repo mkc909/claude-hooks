@@ -74,32 +74,39 @@ export async function listSessions(
 		limit?: number;
 		offset?: number;
 	}
-): Promise<{ sessions: SessionRow[]; count: number }> {
-	let sql = 'SELECT * FROM sessions WHERE 1=1';
-	const params: (string | number)[] = [];
+): Promise<{ sessions: SessionRow[]; total: number }> {
+	// Build WHERE clause for both count and data queries
+	let whereSql = ' WHERE 1=1';
+	const whereParams: (string | number)[] = [];
 
 	if (filters.user_id) {
-		sql += ' AND user_id = ?';
-		params.push(filters.user_id);
+		whereSql += ' AND user_id = ?';
+		whereParams.push(filters.user_id);
 	}
 	if (filters.project) {
-		sql += ' AND project = ?';
-		params.push(filters.project);
+		whereSql += ' AND project = ?';
+		whereParams.push(filters.project);
 	}
 	if (filters.since) {
-		sql += ' AND started_at >= ?';
-		params.push(filters.since);
+		whereSql += ' AND started_at >= ?';
+		whereParams.push(filters.since);
 	}
 	if (filters.until) {
-		sql += ' AND started_at <= ?';
-		params.push(filters.until);
+		whereSql += ' AND started_at <= ?';
+		whereParams.push(filters.until);
 	}
 
-	sql += ' ORDER BY started_at DESC LIMIT ? OFFSET ?';
-	params.push(filters.limit || 50, filters.offset || 0);
+	// Run COUNT(*) query for actual total
+	const countSql = 'SELECT COUNT(*) as total FROM sessions' + whereSql;
+	const countResult = await db.prepare(countSql).bind(...whereParams).first<{ total: number }>();
+	const total = countResult?.total || 0;
 
-	const { results } = await db.prepare(sql).bind(...params).all<SessionRow>();
-	return { sessions: results || [], count: results?.length || 0 };
+	// Run data query with LIMIT/OFFSET
+	const dataSql = 'SELECT * FROM sessions' + whereSql + ' ORDER BY started_at DESC LIMIT ? OFFSET ?';
+	const dataParams = [...whereParams, filters.limit || 50, filters.offset || 0];
+	const { results } = await db.prepare(dataSql).bind(...dataParams).all<SessionRow>();
+
+	return { sessions: results || [], total };
 }
 
 /**

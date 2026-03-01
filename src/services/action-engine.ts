@@ -52,9 +52,11 @@ type ActionConfig = NotifyDiscordConfig | SyncOpsConfig | TrackEventConfig | Sen
 /**
  * Evaluate active action rules against a hook event.
  * Triggers configured actions for any matching rules not in cooldown.
+ * When tenantId is provided, only tenant-scoped rules are evaluated.
+ * When tenantId is omitted, only platform-level rules (tenant_id IS NULL) are evaluated.
  */
-export async function evaluateActionRules(env: Env, event: ActionEvent): Promise<void> {
-	const rules = await getActiveRules(env, event.event_type);
+export async function evaluateActionRules(env: Env, event: ActionEvent, tenantId?: string): Promise<void> {
+	const rules = await getActiveRules(env, event.event_type, tenantId);
 
 	for (const rule of rules) {
 		try {
@@ -87,9 +89,11 @@ export async function evaluateActionRules(env: Env, event: ActionEvent): Promise
 
 /**
  * Get active action rules for a given event type, using KV cache.
+ * When tenantId is provided, returns only tenant-scoped rules.
+ * When tenantId is omitted, returns only platform-level rules (tenant_id IS NULL).
  */
-async function getActiveRules(env: Env, eventType: string): Promise<ActionRuleRow[]> {
-	const cacheKey = `${RULES_CACHE_KEY}:${eventType}`;
+async function getActiveRules(env: Env, eventType: string, tenantId?: string): Promise<ActionRuleRow[]> {
+	const cacheKey = `${RULES_CACHE_KEY}:${eventType}:${tenantId || '_platform'}`;
 
 	try {
 		const cached = await env.CACHE.get(cacheKey, 'json');
@@ -98,19 +102,27 @@ async function getActiveRules(env: Env, eventType: string): Promise<ActionRuleRo
 		// Cache miss, fall through to D1
 	}
 
-	const { results } = await env.DB.prepare(
-		'SELECT * FROM action_rules WHERE trigger_event = ? AND is_active = 1 ORDER BY created_at ASC'
-	).bind(eventType).all<ActionRuleRow>();
+	let results: ActionRuleRow[];
 
-	const rules = results || [];
+	if (tenantId) {
+		const { results: rows } = await env.DB.prepare(
+			'SELECT * FROM action_rules WHERE trigger_event = ? AND is_active = 1 AND tenant_id = ? ORDER BY created_at ASC'
+		).bind(eventType, tenantId).all<ActionRuleRow>();
+		results = rows || [];
+	} else {
+		const { results: rows } = await env.DB.prepare(
+			'SELECT * FROM action_rules WHERE trigger_event = ? AND is_active = 1 AND tenant_id IS NULL ORDER BY created_at ASC'
+		).bind(eventType).all<ActionRuleRow>();
+		results = rows || [];
+	}
 
 	try {
-		await env.CACHE.put(cacheKey, JSON.stringify(rules), { expirationTtl: RULES_CACHE_TTL });
+		await env.CACHE.put(cacheKey, JSON.stringify(results), { expirationTtl: RULES_CACHE_TTL });
 	} catch {
 		// Non-critical
 	}
 
-	return rules;
+	return results;
 }
 
 /**
@@ -407,10 +419,13 @@ function parseJson<T>(str: string | null | undefined): T | null {
 /**
  * Invalidate the KV cache for a given trigger_event type.
  * Call this whenever an action rule is created, updated, or deactivated.
+ * When tenantId is provided, invalidates the tenant-scoped cache.
+ * When tenantId is omitted, invalidates the platform-level cache.
  */
-export async function invalidateRulesCache(env: Env, triggerEvent: string): Promise<void> {
+export async function invalidateRulesCache(env: Env, triggerEvent: string, tenantId?: string): Promise<void> {
+	const suffix = tenantId || '_platform';
 	try {
-		await env.CACHE.delete(`${RULES_CACHE_KEY}:${triggerEvent}`);
+		await env.CACHE.delete(`${RULES_CACHE_KEY}:${triggerEvent}:${suffix}`);
 	} catch {
 		// Non-critical
 	}
