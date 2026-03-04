@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@mkc909/worker-lib": "^1.8.0",
-    "hono": "^4.7.0"
+    "hono": "^4.12.5"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250224.0",
