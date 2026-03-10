@@ -11,13 +11,68 @@ import { SIMPLE_EVENT_ROUTES } from '../config/route-registry';
 export const hookRoutes = new Hono<{ Bindings: Env }>();
 
 // --------------------------------------------------------------------------
+// Payload parsing middleware — validates JSON + session_id, returns 400 on bad input
+// --------------------------------------------------------------------------
+hookRoutes.use('*', async (c, next) => {
+	try {
+		// Pre-parse body so downstream handlers don't throw on malformed JSON
+		await c.req.json();
+	} catch {
+		return c.json({
+			type: 'https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400',
+			status: 400,
+			title: 'Bad Request',
+			detail: 'Invalid or missing JSON body',
+		}, 400);
+	}
+	await next();
+});
+
+/**
+ * Safely parse hook payload. Returns null and a 400 response if session_id is missing.
+ */
+function requireSessionId(payload: HookPayload): string {
+	if (!payload.session_id || typeof payload.session_id !== 'string') {
+		throw new PayloadError('Missing required field: session_id');
+	}
+	return payload.session_id;
+}
+
+class PayloadError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'PayloadError';
+	}
+}
+
+// Catch PayloadError and return 400
+hookRoutes.onError((err, c) => {
+	if (err instanceof PayloadError) {
+		return c.json({
+			type: 'https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400',
+			status: 400,
+			title: 'Bad Request',
+			detail: err.message,
+		}, 400);
+	}
+	console.error('[hooks] Unhandled error:', err);
+	return c.json({
+		type: 'https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500',
+		status: 500,
+		title: 'Internal Server Error',
+		detail: 'An unexpected error occurred',
+	}, 500);
+});
+
+// --------------------------------------------------------------------------
 // POST /hooks/session-start — SessionStart
 // --------------------------------------------------------------------------
 hookRoutes.post('/session-start', async (c) => {
 	const payload = await c.req.json<HookPayload>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
-		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode)
+		upsertSession(c.env.DB, sessionId, payload.cwd, payload.permission_mode)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -29,10 +84,11 @@ hookRoutes.post('/session-start', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/prompt', async (c) => {
 	const payload = await c.req.json<UserPromptSubmitPayload>();
+	const sessionId = requireSessionId(payload);
 
 	// Ensure session exists
 	c.executionCtx.waitUntil(
-		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode)
+		upsertSession(c.env.DB, sessionId, payload.cwd, payload.permission_mode)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -43,7 +99,7 @@ hookRoutes.post('/prompt', async (c) => {
 			VALUES (?, ?, ?, ?)
 		`).bind(
 			generateId(IdPrefixes.PROMPT),
-			payload.session_id,
+			sessionId,
 			truncate(payload.prompt, 500),
 			payload.prompt?.length || 0
 		).run()
@@ -58,6 +114,10 @@ hookRoutes.post('/prompt', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/pre-tool-use', async (c) => {
 	const payload = await c.req.json<PreToolUsePayload>();
+	const sessionId = requireSessionId(payload);
+	const toolName = payload.tool_name || 'unknown';
+	const toolInput = payload.tool_input || {};
+	const toolUseId = payload.tool_use_id || null;
 
 	// Evaluate security policies
 	const decision = await evaluatePolicies(c.env, payload);
@@ -70,12 +130,12 @@ hookRoutes.post('/pre-tool-use', async (c) => {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).bind(
 			eventId,
-			payload.session_id,
+			sessionId,
 			HookEvents.PRE_TOOL_USE,
-			payload.tool_name,
-			payload.tool_use_id,
-			summarizeToolInput(payload.tool_name, payload.tool_input),
-			extractFilePath(payload.tool_name, payload.tool_input),
+			toolName,
+			toolUseId,
+			summarizeToolInput(toolName, toolInput),
+			extractFilePath(toolName, toolInput),
 			decision.decision,
 			decision.reason || null,
 			decision.policyId || null
@@ -85,7 +145,7 @@ hookRoutes.post('/pre-tool-use', async (c) => {
 
 	// Increment session tool call counter
 	c.executionCtx.waitUntil(
-		incrementToolCalls(c.env.DB, payload.session_id)
+		incrementToolCalls(c.env.DB, sessionId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -108,9 +168,13 @@ hookRoutes.post('/pre-tool-use', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/post-tool-use', async (c) => {
 	const payload = await c.req.json<PostToolUsePayload>();
+	const sessionId = requireSessionId(payload);
+	const toolName = payload.tool_name || 'unknown';
+	const toolInput = payload.tool_input || {};
+	const toolUseId = payload.tool_use_id || null;
 
-	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
-	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
+	const inputSummary = summarizeToolInput(toolName, toolInput);
+	const filePath = extractFilePath(toolName, toolInput);
 
 	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
@@ -119,10 +183,10 @@ hookRoutes.post('/post-tool-use', async (c) => {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
 		`).bind(
 			eventId,
-			payload.session_id,
+			sessionId,
 			HookEvents.POST_TOOL_USE,
-			payload.tool_name,
-			payload.tool_use_id,
+			toolName,
+			toolUseId,
 			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
@@ -132,9 +196,9 @@ hookRoutes.post('/post-tool-use', async (c) => {
 
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
-			session_id: payload.session_id,
+			session_id: sessionId,
 			event_type: HookEvents.POST_TOOL_USE,
-			tool_name: payload.tool_name,
+			tool_name: toolName,
 			input_summary: inputSummary || undefined,
 			file_path: filePath || undefined,
 			success: true,
@@ -149,9 +213,13 @@ hookRoutes.post('/post-tool-use', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/post-tool-failure', async (c) => {
 	const payload = await c.req.json<PostToolUsePayload>();
+	const sessionId = requireSessionId(payload);
+	const toolName = payload.tool_name || 'unknown';
+	const toolInput = payload.tool_input || {};
+	const toolUseId = payload.tool_use_id || null;
 
-	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
-	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
+	const inputSummary = summarizeToolInput(toolName, toolInput);
+	const filePath = extractFilePath(toolName, toolInput);
 
 	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
@@ -160,10 +228,10 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
 		`).bind(
 			eventId,
-			payload.session_id,
+			sessionId,
 			HookEvents.POST_TOOL_USE_FAILURE,
-			payload.tool_name,
-			payload.tool_use_id,
+			toolName,
+			toolUseId,
 			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
@@ -173,9 +241,9 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
-			session_id: payload.session_id,
+			session_id: sessionId,
 			event_type: HookEvents.POST_TOOL_USE_FAILURE,
-			tool_name: payload.tool_name,
+			tool_name: toolName,
 			input_summary: inputSummary || undefined,
 			file_path: filePath || undefined,
 			success: false,
@@ -190,6 +258,7 @@ hookRoutes.post('/post-tool-failure', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/stop', async (c) => {
 	const payload = await c.req.json<StopPayload>();
+	const sessionId = requireSessionId(payload);
 
 	// Log stop event
 	c.executionCtx.waitUntil(
@@ -198,7 +267,7 @@ hookRoutes.post('/stop', async (c) => {
 			VALUES (?, ?, ?, ?, NULL, ?, 1)
 		`).bind(
 			generateId(IdPrefixes.TOOL_EVENT),
-			payload.session_id,
+			sessionId,
 			HookEvents.STOP,
 			Tools.STOP,
 			truncate(payload.last_assistant_message, 500)
@@ -208,7 +277,7 @@ hookRoutes.post('/stop', async (c) => {
 
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
-			session_id: payload.session_id,
+			session_id: sessionId,
 			event_type: HookEvents.STOP,
 			success: true,
 		}).catch(e => console.error('[hooks] waitUntil error:', e))
@@ -222,12 +291,13 @@ hookRoutes.post('/stop', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/subagent-start', async (c) => {
 	const payload = await c.req.json<HookPayload>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, ?, ?, NULL, 1)
-		`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, HookEvents.SUBAGENT_START, Tools.SUBAGENT).run()
+		`).bind(generateId(IdPrefixes.TOOL_EVENT), sessionId, HookEvents.SUBAGENT_START, Tools.SUBAGENT).run()
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -239,12 +309,13 @@ hookRoutes.post('/subagent-start', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/subagent-stop', async (c) => {
 	const payload = await c.req.json<HookPayload>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
 			INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 			VALUES (?, ?, ?, ?, NULL, 1)
-		`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, HookEvents.SUBAGENT_STOP, Tools.SUBAGENT).run()
+		`).bind(generateId(IdPrefixes.TOOL_EVENT), sessionId, HookEvents.SUBAGENT_STOP, Tools.SUBAGENT).run()
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -256,23 +327,24 @@ hookRoutes.post('/subagent-stop', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/session-end', async (c) => {
 	const payload = await c.req.json<HookPayload>();
+	const sessionId = requireSessionId(payload);
 
 	// End session
 	c.executionCtx.waitUntil(
-		endSession(c.env.DB, payload.session_id)
+		endSession(c.env.DB, sessionId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	// Extract progress (async)
 	c.executionCtx.waitUntil(
-		extractProgress(c.env, payload.session_id)
+		extractProgress(c.env, sessionId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	// Trigger action rules for SessionEnd
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
-			session_id: payload.session_id,
+			session_id: sessionId,
 			event_type: HookEvents.SESSION_END,
 		}).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
@@ -285,6 +357,7 @@ hookRoutes.post('/session-end', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/worktree-create', async (c) => {
 	const payload = await c.req.json<HookPayload & { name?: string; branch?: string; path?: string }>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
@@ -292,7 +365,7 @@ hookRoutes.post('/worktree-create', async (c) => {
 			VALUES (?, ?, ?, ?, ?, ?, 'active')
 		`).bind(
 			generateId(IdPrefixes.WORKTREE),
-			payload.session_id,
+			sessionId,
 			payload.name || null,
 			payload.branch || null,
 			payload.path || payload.cwd || '',
@@ -309,13 +382,14 @@ hookRoutes.post('/worktree-create', async (c) => {
 // --------------------------------------------------------------------------
 hookRoutes.post('/worktree-remove', async (c) => {
 	const payload = await c.req.json<HookPayload & { path?: string }>();
+	const sessionId = requireSessionId(payload);
 
 	if (payload.path) {
 		c.executionCtx.waitUntil(
 			c.env.DB.prepare(`
 				UPDATE worktrees SET status = 'cleaned', removed_at = datetime('now')
 				WHERE session_id = ? AND path = ? AND status = 'active'
-			`).bind(payload.session_id, payload.path).run()
+			`).bind(sessionId, payload.path).run()
 				.catch(e => console.error('[hooks] waitUntil error:', e))
 		);
 	}
@@ -329,12 +403,13 @@ hookRoutes.post('/worktree-remove', async (c) => {
 for (const route of SIMPLE_EVENT_ROUTES) {
 	hookRoutes.post(`/${route.path}`, async (c) => {
 		const payload = await c.req.json<HookPayload>();
+		const sessionId = requireSessionId(payload);
 
 		c.executionCtx.waitUntil(
 			c.env.DB.prepare(`
 				INSERT INTO tool_events (id, session_id, event_type, tool_name, tool_use_id, success)
 				VALUES (?, ?, ?, ?, NULL, 1)
-			`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, route.event, route.defaultToolName).run()
+			`).bind(generateId(IdPrefixes.TOOL_EVENT), sessionId, route.event, route.defaultToolName).run()
 				.catch(e => console.error('[hooks] waitUntil error:', e))
 		);
 

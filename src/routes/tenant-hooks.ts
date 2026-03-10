@@ -45,6 +45,40 @@ async function verifyTenantAccess(c: { env: Env; req: { header: (name: string) =
 	return false;
 }
 
+class PayloadError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'PayloadError';
+	}
+}
+
+function requireSessionId(payload: HookPayload): string {
+	if (!payload.session_id || typeof payload.session_id !== 'string') {
+		throw new PayloadError('Missing required field: session_id');
+	}
+	return payload.session_id;
+}
+
+// --------------------------------------------------------------------------
+// Payload parsing middleware — validates JSON body
+// --------------------------------------------------------------------------
+tenantHookRoutes.use('/:tenantId/*', async (c, next) => {
+	// Only validate JSON for POST requests (not the auth middleware pass-through)
+	if (c.req.method === 'POST') {
+		try {
+			await c.req.json();
+		} catch {
+			return c.json({
+				type: 'https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400',
+				status: 400,
+				title: 'Bad Request',
+				detail: 'Invalid or missing JSON body',
+			}, 400);
+		}
+	}
+	await next();
+});
+
 // --------------------------------------------------------------------------
 // Tenant auth middleware (applied to all tenant routes)
 // --------------------------------------------------------------------------
@@ -59,15 +93,35 @@ tenantHookRoutes.use('/:tenantId/*', async (c, next) => {
 	await next();
 });
 
+// Catch PayloadError and return 400
+tenantHookRoutes.onError((err, c) => {
+	if (err instanceof PayloadError) {
+		return c.json({
+			type: 'https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400',
+			status: 400,
+			title: 'Bad Request',
+			detail: err.message,
+		}, 400);
+	}
+	console.error('[hooks] Unhandled error:', err);
+	return c.json({
+		type: 'https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500',
+		status: 500,
+		title: 'Internal Server Error',
+		detail: 'An unexpected error occurred',
+	}, 500);
+});
+
 // --------------------------------------------------------------------------
 // POST /tenant/:tenantId/session-start
 // --------------------------------------------------------------------------
 tenantHookRoutes.post('/:tenantId/session-start', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<HookPayload>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
-		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode, tenantId)
+		upsertSession(c.env.DB, sessionId, payload.cwd, payload.permission_mode, tenantId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -80,9 +134,10 @@ tenantHookRoutes.post('/:tenantId/session-start', async (c) => {
 tenantHookRoutes.post('/:tenantId/prompt', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<UserPromptSubmitPayload>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
-		upsertSession(c.env.DB, payload.session_id, payload.cwd, payload.permission_mode, tenantId)
+		upsertSession(c.env.DB, sessionId, payload.cwd, payload.permission_mode, tenantId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -92,7 +147,7 @@ tenantHookRoutes.post('/:tenantId/prompt', async (c) => {
 			VALUES (?, ?, ?, ?, ?)
 		`).bind(
 			generateId(IdPrefixes.PROMPT),
-			payload.session_id,
+			sessionId,
 			tenantId,
 			truncate(payload.prompt, 500),
 			payload.prompt?.length || 0
@@ -109,6 +164,10 @@ tenantHookRoutes.post('/:tenantId/prompt', async (c) => {
 tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<PreToolUsePayload>();
+	const sessionId = requireSessionId(payload);
+	const toolName = payload.tool_name || 'unknown';
+	const toolInput = payload.tool_input || {};
+	const toolUseId = payload.tool_use_id || null;
 
 	// Evaluate tenant-scoped policies
 	const decision = await evaluatePolicies(c.env, payload, tenantId);
@@ -120,13 +179,13 @@ tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).bind(
 			eventId,
-			payload.session_id,
+			sessionId,
 			tenantId,
 			HookEvents.PRE_TOOL_USE,
-			payload.tool_name,
-			payload.tool_use_id,
-			summarizeToolInput(payload.tool_name, payload.tool_input),
-			extractFilePath(payload.tool_name, payload.tool_input),
+			toolName,
+			toolUseId,
+			summarizeToolInput(toolName, toolInput),
+			extractFilePath(toolName, toolInput),
 			decision.decision,
 			decision.reason || null,
 			decision.policyId || null
@@ -135,7 +194,7 @@ tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 	);
 
 	c.executionCtx.waitUntil(
-		incrementToolCalls(c.env.DB, payload.session_id)
+		incrementToolCalls(c.env.DB, sessionId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
@@ -158,9 +217,13 @@ tenantHookRoutes.post('/:tenantId/pre-tool-use', async (c) => {
 tenantHookRoutes.post('/:tenantId/post-tool-use', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<PostToolUsePayload>();
+	const sessionId = requireSessionId(payload);
+	const toolName = payload.tool_name || 'unknown';
+	const toolInput = payload.tool_input || {};
+	const toolUseId = payload.tool_use_id || null;
 
-	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
-	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
+	const inputSummary = summarizeToolInput(toolName, toolInput);
+	const filePath = extractFilePath(toolName, toolInput);
 
 	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
@@ -169,11 +232,11 @@ tenantHookRoutes.post('/:tenantId/post-tool-use', async (c) => {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 		`).bind(
 			eventId,
-			payload.session_id,
+			sessionId,
 			tenantId,
 			HookEvents.POST_TOOL_USE,
-			payload.tool_name,
-			payload.tool_use_id,
+			toolName,
+			toolUseId,
 			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
@@ -190,9 +253,13 @@ tenantHookRoutes.post('/:tenantId/post-tool-use', async (c) => {
 tenantHookRoutes.post('/:tenantId/post-tool-failure', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<PostToolUsePayload>();
+	const sessionId = requireSessionId(payload);
+	const toolName = payload.tool_name || 'unknown';
+	const toolInput = payload.tool_input || {};
+	const toolUseId = payload.tool_use_id || null;
 
-	const inputSummary = summarizeToolInput(payload.tool_name, payload.tool_input);
-	const filePath = extractFilePath(payload.tool_name, payload.tool_input);
+	const inputSummary = summarizeToolInput(toolName, toolInput);
+	const filePath = extractFilePath(toolName, toolInput);
 
 	const eventId = generateId(IdPrefixes.TOOL_EVENT);
 	c.executionCtx.waitUntil(
@@ -201,11 +268,11 @@ tenantHookRoutes.post('/:tenantId/post-tool-failure', async (c) => {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
 		`).bind(
 			eventId,
-			payload.session_id,
+			sessionId,
 			tenantId,
 			HookEvents.POST_TOOL_USE_FAILURE,
-			payload.tool_name,
-			payload.tool_use_id,
+			toolName,
+			toolUseId,
 			inputSummary,
 			truncate(safeStringify(payload.tool_response), 1000),
 			filePath
@@ -222,6 +289,7 @@ tenantHookRoutes.post('/:tenantId/post-tool-failure', async (c) => {
 tenantHookRoutes.post('/:tenantId/stop', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<StopPayload>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
 		c.env.DB.prepare(`
@@ -229,7 +297,7 @@ tenantHookRoutes.post('/:tenantId/stop', async (c) => {
 			VALUES (?, ?, ?, ?, ?, NULL, ?, 1)
 		`).bind(
 			generateId(IdPrefixes.TOOL_EVENT),
-			payload.session_id,
+			sessionId,
 			tenantId,
 			HookEvents.STOP,
 			Tools.STOP,
@@ -247,22 +315,23 @@ tenantHookRoutes.post('/:tenantId/stop', async (c) => {
 tenantHookRoutes.post('/:tenantId/session-end', async (c) => {
 	const tenantId = c.req.param('tenantId');
 	const payload = await c.req.json<HookPayload>();
+	const sessionId = requireSessionId(payload);
 
 	c.executionCtx.waitUntil(
-		endSession(c.env.DB, payload.session_id)
+		endSession(c.env.DB, sessionId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	// Extract progress (async)
 	c.executionCtx.waitUntil(
-		extractProgress(c.env, payload.session_id)
+		extractProgress(c.env, sessionId)
 			.catch(e => console.error('[hooks] waitUntil error:', e))
 	);
 
 	// Trigger action rules for SessionEnd (tenant-scoped)
 	c.executionCtx.waitUntil(
 		evaluateActionRules(c.env, {
-			session_id: payload.session_id,
+			session_id: sessionId,
 			event_type: HookEvents.SESSION_END,
 		}, tenantId).catch(e => console.error('[hooks] waitUntil error:', e))
 	);
@@ -277,12 +346,13 @@ for (const route of SIMPLE_EVENT_ROUTES) {
 	tenantHookRoutes.post(`/:tenantId/${route.path}`, async (c) => {
 		const tenantId = c.req.param('tenantId');
 		const payload = await c.req.json<HookPayload>();
+		const sessionId = requireSessionId(payload);
 
 		c.executionCtx.waitUntil(
 			c.env.DB.prepare(`
 				INSERT INTO tool_events (id, session_id, tenant_id, event_type, tool_name, tool_use_id, success)
 				VALUES (?, ?, ?, ?, ?, NULL, 1)
-			`).bind(generateId(IdPrefixes.TOOL_EVENT), payload.session_id, tenantId, route.event, route.defaultToolName).run()
+			`).bind(generateId(IdPrefixes.TOOL_EVENT), sessionId, tenantId, route.event, route.defaultToolName).run()
 				.catch(e => console.error('[hooks] waitUntil error:', e))
 		);
 
