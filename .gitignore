@@ -3,3 +3,6 @@ dist/
 .dev.vars
 .wrangler/
 *.log
+
+# Session logs
+_session-logs/
