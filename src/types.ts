@@ -11,6 +11,8 @@ export interface Env {
 	HOOK_SECRET: string;
 	ADMIN_API_KEY: string;
 	ENVIRONMENT: string;
+	PERSONAL_OS_URL?: string;
+	PERSONAL_OS_INGEST_KEY?: string;
 }
 
 // D1 Row Types

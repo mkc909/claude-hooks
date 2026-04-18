@@ -53,6 +53,7 @@
   },
 
   "vars": {
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "PERSONAL_OS_URL": "https://personal-os.possibility-engineering.workers.dev"
   }
 }

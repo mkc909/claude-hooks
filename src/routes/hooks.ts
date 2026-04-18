@@ -5,6 +5,7 @@ import { evaluatePolicies } from '../services/policy-engine';
 import { upsertSession, endSession, incrementToolCalls } from '../services/session-manager';
 import { extractProgress } from '../services/progress-extractor';
 import { evaluateActionRules } from '../services/action-engine';
+import { syncSessionToPersonalOS } from '../services/personalos-sync';
 import { HookEvents, Tools, IdPrefixes } from '../config/manifest';
 import { SIMPLE_EVENT_ROUTES } from '../config/route-registry';
 
@@ -347,6 +348,14 @@ hookRoutes.post('/session-end', async (c) => {
 			session_id: sessionId,
 			event_type: HookEvents.SESSION_END,
 		}).catch(e => console.error('[hooks] waitUntil error:', e))
+	);
+
+	// Sync session to PersonalOS brain (async, non-blocking)
+	// Small delay to let extractProgress finish writing project_status
+	c.executionCtx.waitUntil(
+		new Promise(resolve => setTimeout(resolve, 2000))
+			.then(() => syncSessionToPersonalOS(c.env, sessionId))
+			.catch(e => console.error('[hooks] PersonalOS sync error:', e))
 	);
 
 	return c.json({});
